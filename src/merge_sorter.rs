@@ -1,6 +1,6 @@
 use crate::thread_pool::ThreadPool;
 use std::{
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
 };
 
 pub fn merge_sort<T: Send + Sync + Clone + PartialOrd + 'static>(
@@ -33,8 +33,8 @@ pub fn merge_sort_seq<T: Clone + PartialOrd>(slice: &[T]) -> Vec<T> {
 }
 
 pub fn merge_sort_par<T: Send + Sync + Clone + PartialOrd>(slice: &[T], pool: Arc<Mutex<ThreadPool<Vec<T>>>>,
-                     level: usize) -> Vec<T> {
-    return if level >= pool.lock().unwrap().size().ilog2() as usize {
+                                                           level: usize) -> Vec<T> {
+    if level >= pool.lock().unwrap().size().ilog2() as usize {
         merge_sort_seq(slice)
     } else {
         merge_sort_par_unchecked(slice, pool, level)
@@ -42,7 +42,7 @@ pub fn merge_sort_par<T: Send + Sync + Clone + PartialOrd>(slice: &[T], pool: Ar
 }
 
 fn merge_sort_par_unchecked<T: Send + Sync + Clone + PartialOrd>(slice: &[T], pool: Arc<Mutex<ThreadPool<Vec<T>>>>,
-                     level: usize) -> Vec<T> {
+                                                                 level: usize) -> Vec<T> {
     match slice.len() {
         0..=1 => slice.to_vec(),
         2 => {
@@ -78,7 +78,7 @@ fn merge<T: PartialOrd + Clone>(left: &[T], right: &[T]) -> Vec<T> {
             left_pos += 1;
         } else {
             merged.push(right[right_pos].clone());
-            right_pos += 1
+            right_pos += 1;
         }
     }
 
@@ -95,6 +95,7 @@ fn merge<T: PartialOrd + Clone>(left: &[T], right: &[T]) -> Vec<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::thread::available_parallelism;
     use super::*;
 
     #[test]
@@ -104,10 +105,18 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_sort() {
+    fn test_merge_sort_seq() {
         let unsorted = vec![5, 1, 9, 10, 3, 45, 2, 4, 4, 12];
         let mut sorted = unsorted.clone();
         sorted.sort();
-        assert_eq!(merge_sort_seq(&unsorted), sorted)
+        assert_eq!(merge_sort(&unsorted, 1), sorted)
+    }
+
+    #[test]
+    fn test_merge_sort_par() {
+        let unsorted = vec![5, 1, 9, 10, 3, 45, 2, 4, 4, 12];
+        let mut sorted = unsorted.clone();
+        sorted.sort();
+        assert_eq!(merge_sort(&unsorted, available_parallelism().unwrap().get()), sorted)
     }
 }
