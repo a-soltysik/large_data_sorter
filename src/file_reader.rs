@@ -35,7 +35,7 @@ pub fn read_from_string<T: FromStr>(data: &str) -> Vec<T> {
     result
 }
 
-pub fn write_from_vec<T: ToString + Sized>(
+pub fn write_from_vec<T: ToString>(
     file_path: &str,
     data: &[T],
     delimiter: &str,
