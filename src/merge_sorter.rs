@@ -1,23 +1,19 @@
 pub mod ram {
-    use crate::thread_pool::ThreadPool;
-    use std::{
-        sync::{Arc, Mutex},
-    };
+    use crate::thread_pool::{Channel, ThreadPool};
+    use std::sync::{Arc, Mutex};
 
-    pub fn merge_sort<T>(slice: &[T], threads_count: usize) -> Vec<T>
-        where
-            T: Send + Sync + Clone + PartialOrd + 'static
-    {
+    pub trait Sort: Clone + PartialOrd {}
+
+    impl<T: Clone + PartialOrd> Sort for T {}
+
+    pub fn merge_sort<T: Sort + Channel>(slice: &[T], threads_count: usize) -> Vec<T> {
         match threads_count {
             0 | 1 => merge_sort_seq(slice),
-            _ => merge_sort_par(slice, Arc::new(Mutex::new(ThreadPool::new(threads_count))), 0),
+            _ => merge_sort_par(slice, threads_count),
         }
     }
 
-    pub fn merge_sort_seq<T>(slice: &[T]) -> Vec<T>
-        where
-            T: Clone + PartialOrd
-    {
+    pub fn merge_sort_seq<T: Sort>(slice: &[T]) -> Vec<T> {
         match slice.len() {
             0..=1 => slice.to_vec(),
             2 => {
@@ -36,21 +32,19 @@ pub mod ram {
         }
     }
 
-    pub fn merge_sort_par<T>(slice: &[T], pool: Arc<Mutex<ThreadPool<Vec<T>>>>, level: usize) -> Vec<T>
-        where
-            T: Send + Sync + PartialOrd + Clone
-    {
-        if level >= pool.lock().unwrap().size().ilog2() as usize {
-            merge_sort_seq(slice)
+    pub fn merge_sort_par<T: Sort + Channel>(slice: &[T], threads_count: usize) -> Vec<T> {
+        merge_sort_par_helper(&slice, Arc::new(Mutex::new(ThreadPool::new(threads_count))))
+    }
+
+    fn merge_sort_par_helper<T: Sort + Channel>(slice: &[T], pool: Arc<Mutex<ThreadPool<Vec<T>>>>) -> Vec<T> {
+        if pool.lock().unwrap().is_available() {
+            merge_sort_par_helper_unchecked(slice, pool)
         } else {
-            merge_sort_par_unchecked(slice, pool, level)
+            merge_sort_seq(slice)
         }
     }
 
-    fn merge_sort_par_unchecked<T>(slice: &[T], pool: Arc<Mutex<ThreadPool<Vec<T>>>>, level: usize) -> Vec<T>
-        where
-            T: Send + Sync + Clone + PartialOrd
-    {
+    fn merge_sort_par_helper_unchecked<T: Sort + Channel>(slice: &[T], pool: Arc<Mutex<ThreadPool<Vec<T>>>>) -> Vec<T> {
         match slice.len() {
             0..=1 => slice.to_vec(),
             2 => {
@@ -65,8 +59,8 @@ pub mod ram {
                 let left = slice[0..middle].to_vec();
                 let new_pool = Arc::clone(&pool);
 
-                let result = pool.lock().unwrap().execute(move || merge_sort_par(&left, new_pool, level + 1));
-                let right_sorted = merge_sort_par(&slice[middle..], Arc::clone(&pool), level + 1);
+                let result = pool.lock().unwrap().execute(move || merge_sort_par_helper(&left, new_pool));
+                let right_sorted = merge_sort_par_helper(&slice[middle..], Arc::clone(&pool));
                 let left_sorted = result.recv().unwrap();
 
                 merge(&left_sorted, &right_sorted)
@@ -74,14 +68,10 @@ pub mod ram {
         }
     }
 
-    fn merge<T>(left: &[T], right: &[T]) -> Vec<T>
-        where
-            T: PartialOrd + Clone
-    {
+    fn merge<T: Sort>(left: &[T], right: &[T]) -> Vec<T> {
         let mut left_pos = 0;
         let mut right_pos = 0;
-        let mut merged: Vec<T> = Vec::new();
-        merged.reserve(left.len() + right.len());
+        let mut merged: Vec<T> = Vec::with_capacity(left.len() + right.len());
 
         while left_pos != left.len() && right_pos < right.len() {
             if left[left_pos] < right[right_pos] {
@@ -135,16 +125,19 @@ pub mod ram {
 
 pub mod file {
     use std::fs;
-    use std::fs::{File};
+    use std::fs::File;
     use std::io::{BufRead, BufReader, BufWriter, Write};
-    use std::path::{MAIN_SEPARATOR_STR};
+    use std::path::MAIN_SEPARATOR_STR;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
     use crate::file_reader;
 
     use crate::merge_sorter::ram;
-    use crate::thread_pool::ThreadPool;
+    use crate::thread_pool::{Channel, ThreadPool};
+
+    pub trait Sort: ram::Sort + FromStr + ToString {}
+
+    impl<T: ram::Sort + FromStr + ToString> Sort for T {}
 
     pub enum ExecPolicy {
         FullPar,
@@ -157,45 +150,21 @@ pub mod file {
         path: String,
     }
 
-    pub fn merge_sort<T>(input: &str, output: &str, max_size_in_ram: usize, threads_count: usize, exec_policy: ExecPolicy)
-        where
-            T: FromStr + Clone + PartialOrd + ToString + Send + Sync + 'static
-    {
+    pub fn merge_sort<T: Sort + Channel>(input: &str, output: &str, max_size_in_ram: usize, threads_count: usize, exec_policy: ExecPolicy) {
         match threads_count {
             0 | 1 => merge_sort_seq::<T>(input, output, max_size_in_ram),
             _ => merge_sort_par::<T>(input, output, max_size_in_ram, threads_count, exec_policy)
         }
     }
 
-    pub fn merge_sort_seq<T>(input: &str, output_path: &str, max_size_in_ram: usize)
-        where
-            T: FromStr + Clone + PartialOrd + ToString
-    {
+    pub fn merge_sort_seq<T: Sort>(input: &str, output_path: &str, max_size_in_ram: usize) {
         let (dir_name, prepared_input) = prepare_input(&input);
         let result = merge_sort_seq_helper::<T>(prepared_input, max_size_in_ram);
 
         clean(&result.path, &output_path, &dir_name)
     }
 
-    fn prepare_input(input: &str) -> (&'static str, FileData) {
-        let dir_name = "__tmp_merge__";
-        let _ = fs::create_dir(&dir_name);
-
-        let copied_input = String::from(dir_name) + MAIN_SEPARATOR_STR + input;
-        let _ = fs::copy(&input, &copied_input);
-
-        (dir_name, FileData { file: File::open(&copied_input).expect("Couldn't open the file"), path: copied_input })
-    }
-
-    fn clean(result_path: &str, output_path: &str, tmp_dir: &str) {
-        let _ = fs::rename(&result_path, &output_path);
-        let _ = fs::remove_dir(&tmp_dir);
-    }
-
-    fn merge_sort_seq_helper<T>(input: FileData, max_size_in_ram: usize) -> FileData
-        where
-            T: FromStr + Clone + PartialOrd + ToString
-    {
+    fn merge_sort_seq_helper<T: Sort>(input: FileData, max_size_in_ram: usize) -> FileData {
         if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
             let data = file_reader::load_file_to_vec::<T>(&input.path);
             let output_path = String::from(&input.path) + "w";
@@ -214,18 +183,15 @@ pub mod file {
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
-    fn merge_sort_par<T>(input: &str, output: &str, max_size_in_ram: usize, threads_count: usize, exec_policy: ExecPolicy)
-        where
-            T: FromStr + Clone + PartialOrd + ToString + Send + Sync + 'static
-    {
+    pub fn merge_sort_par<T: Sort + Channel>(input: &str, output: &str, max_size_in_ram: usize, threads_count: usize, exec_policy: ExecPolicy) {
         let (dir_name, prepared_input) = prepare_input(&input);
 
         let result = match exec_policy {
             ExecPolicy::FullPar => {
-                merge_sort_full_par_helper::<T>(prepared_input, max_size_in_ram, Arc::new(Mutex::new(ThreadPool::new(threads_count))), 0)
+                merge_sort_full_par_helper::<T>(prepared_input, max_size_in_ram, Arc::new(Mutex::new(ThreadPool::new(threads_count))))
             }
             ExecPolicy::FileParRamSeq => {
-                merge_sort_file_par_ram_seq_helper::<T>(prepared_input, max_size_in_ram, Arc::new(Mutex::new(ThreadPool::new(threads_count))), 0)
+                merge_sort_file_par_ram_seq_helper::<T>(prepared_input, max_size_in_ram, Arc::new(Mutex::new(ThreadPool::new(threads_count))))
             }
             ExecPolicy::FileSeqRamPar => {
                 merge_sort_file_seq_ram_par_helper::<T>(prepared_input, max_size_in_ram, threads_count)
@@ -235,23 +201,15 @@ pub mod file {
         clean(&result.path, &output, &dir_name);
     }
 
-    fn merge_sort_full_par_helper<T>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>,
-                                     level: usize) -> FileData
-        where
-            T: FromStr + Clone + PartialOrd + ToString + Send + Sync + 'static
-    {
-        if pool.lock().unwrap().available_workers() == 0 {
-            merge_sort_seq_helper::<T>(input, max_size_in_ram)
+    fn merge_sort_full_par_helper<T: Sort + Channel>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>) -> FileData {
+        if pool.lock().unwrap().is_available() {
+            merge_sort_full_par_helper_unchecked::<T>(input, max_size_in_ram, pool)
         } else {
-            merge_sort_full_par_helper_unchecked::<T>(input, max_size_in_ram, pool, level)
+            merge_sort_seq_helper::<T>(input, max_size_in_ram)
         }
     }
 
-    fn merge_sort_full_par_helper_unchecked<T>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>,
-                                               level: usize) -> FileData
-        where
-            T: FromStr + Clone + PartialOrd + ToString + Send + Sync + 'static
-    {
+    fn merge_sort_full_par_helper_unchecked<T: Sort + Channel>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>) -> FileData {
         if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
             return compute_in_ram::<T>(&input.path, pool.lock().unwrap().available_workers());
         }
@@ -261,34 +219,23 @@ pub mod file {
         let (left, right) = split_file(input);
 
         let new_pool = Arc::clone(&pool);
-        let result = pool.lock().unwrap().execute(move || merge_sort_full_par_helper::<T>(left, max_size_in_ram, new_pool, level + 1));
-        let right_sorted = merge_sort_full_par_helper::<T>(right, max_size_in_ram, Arc::clone(&pool), level + 1);
+        let result = pool.lock().unwrap().execute(move || merge_sort_full_par_helper::<T>(left, max_size_in_ram, new_pool));
+        let right_sorted = merge_sort_full_par_helper::<T>(right, max_size_in_ram, Arc::clone(&pool));
         let left_sorted = result.recv().unwrap();
 
-        let tmp_output = File::create(&tmp_output_path)
-            .expect("Couldn't open the file");
+        let tmp_output = File::create(&tmp_output_path).expect("Couldn't open the file");
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
-    fn merge_sort_file_par_ram_seq_helper<T>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>,
-                                             level: usize) -> FileData
-        where
-            T: FromStr + Clone + PartialOrd + ToString + Send + Sync + 'static
-    {
-        let now = Instant::now();
-        if pool.lock().unwrap().available_workers() == 0 {
-            println!("Pool in {} ms", now.elapsed().as_millis());
-            merge_sort_seq_helper::<T>(input, max_size_in_ram)
+    fn merge_sort_file_par_ram_seq_helper<T: Sort + Channel>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>) -> FileData {
+        if pool.lock().unwrap().is_available() {
+            merge_sort_file_par_ram_seq_helper_unchecked::<T>(input, max_size_in_ram, pool)
         } else {
-            println!("Pool in {} ms", now.elapsed().as_millis());
-            merge_sort_file_par_ram_seq_helper_unchecked::<T>(input, max_size_in_ram, pool, level)
+            merge_sort_seq_helper::<T>(input, max_size_in_ram)
         }
     }
 
-    fn compute_in_ram<T>(input_path: &str, threads_count: usize) -> FileData
-        where
-            T: FromStr + Send + Sync + Clone + PartialOrd + ToString + 'static
-    {
+    fn compute_in_ram<T: Sort + Channel>(input_path: &str, threads_count: usize) -> FileData {
         let data = file_reader::load_file_to_vec::<T>(&input_path);
         let output_path = String::from(input_path) + "w";
         let _ = file_reader::write_from_vec(&output_path, &ram::merge_sort(&data, threads_count), "\n");
@@ -296,11 +243,7 @@ pub mod file {
         FileData { file: File::open(&output_path).unwrap(), path: output_path }
     }
 
-    fn merge_sort_file_par_ram_seq_helper_unchecked<T>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>,
-                                                       level: usize) -> FileData
-        where
-            T: FromStr + Send + Sync + Clone + PartialOrd + ToString + 'static
-    {
+    fn merge_sort_file_par_ram_seq_helper_unchecked<T: Sort + Channel>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>) -> FileData {
         if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
             return compute_in_ram::<T>(&input.path, 1);
         }
@@ -310,20 +253,16 @@ pub mod file {
         let (left, right) = split_file(input);
 
         let new_pool = Arc::clone(&pool);
-        let result = pool.lock().unwrap().execute(move || merge_sort_file_par_ram_seq_helper::<T>(left, max_size_in_ram, new_pool, level + 1));
-        let right_sorted = merge_sort_file_par_ram_seq_helper::<T>(right, max_size_in_ram, Arc::clone(&pool), level + 1);
+        let result = pool.lock().unwrap().execute(move || merge_sort_file_par_ram_seq_helper::<T>(left, max_size_in_ram, new_pool));
+        let right_sorted = merge_sort_file_par_ram_seq_helper::<T>(right, max_size_in_ram, Arc::clone(&pool));
         let left_sorted = result.recv().unwrap();
 
-        let tmp_output = File::create(&tmp_output_path)
-            .expect("Couldn't open the file");
+        let tmp_output = File::create(&tmp_output_path).expect("Couldn't open the file");
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
-    fn merge_sort_file_seq_ram_par_helper<T>(input: FileData, max_size_in_ram: usize,
-                                             threads_count: usize) -> FileData
-        where
-            T: FromStr + Send + Sync + Clone + PartialOrd + ToString + 'static
-    {
+    fn merge_sort_file_seq_ram_par_helper<T: Sort + Channel>(input: FileData, max_size_in_ram: usize,
+                                                             threads_count: usize) -> FileData {
         if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
             return compute_in_ram::<T>(&input.path, threads_count);
         }
@@ -335,13 +274,12 @@ pub mod file {
         let left_sorted = merge_sort_file_seq_ram_par_helper::<T>(left, max_size_in_ram, threads_count);
         let right_sorted = merge_sort_file_seq_ram_par_helper::<T>(right, max_size_in_ram, threads_count);
 
-        let tmp_output = File::create(&tmp_output_path)
-            .expect("Couldn't open the file");
+        let tmp_output = File::create(&tmp_output_path).expect("Couldn't open the file");
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
     fn split_file(input: FileData) -> (FileData, FileData) {
-        let lines_count = get_lines_count(&input.path);
+        let lines_count = file_reader::get_lines_count(&input.path).expect("Couldn't open the file");
 
         let file1_path = input.path.clone() + "1";
         let file2_path = input.path.clone() + "2";
@@ -367,15 +305,7 @@ pub mod file {
          FileData { file: File::open(file2_path.as_str()).expect("Couldn't open the file"), path: file2_path })
     }
 
-    fn get_lines_count(path: &str) -> usize {
-        let new_file = File::open(&path).expect("Couldn't open the file");
-        BufReader::new(new_file).lines().count()
-    }
-
-    fn merge<T>(left: FileData, right: FileData, output: FileData) -> FileData
-        where
-            T: PartialOrd + Clone + ToString + FromStr
-    {
+    fn merge<T: Sort>(left: FileData, right: FileData, output: FileData) -> FileData {
         let mut output_buff = BufWriter::new(output.file);
         let mut left_buff = BufReader::new(left.file);
         let mut right_buff = BufReader::new(right.file);
@@ -401,8 +331,8 @@ pub mod file {
             }
         }
 
-        write_whole_to::<T>(&mut left_buff, &mut output_buff);
-        write_whole_to::<T>(&mut right_buff, &mut output_buff);
+        write_whole_to(&mut left_buff, &mut output_buff);
+        write_whole_to(&mut right_buff, &mut output_buff);
 
         let _ = fs::remove_file(left.path);
         let _ = fs::remove_file(right.path);
@@ -411,10 +341,7 @@ pub mod file {
         FileData { file: result, path: output.path }
     }
 
-    fn get_next<T>(buffer: &mut BufReader<File>) -> Option<T>
-        where
-            T: FromStr
-    {
+    fn get_next<T: FromStr>(buffer: &mut BufReader<File>) -> Option<T> {
         let mut data = String::new();
         match buffer.read_line(&mut data) {
             Ok(_) => {
@@ -427,7 +354,7 @@ pub mod file {
         }
     }
 
-    fn write_whole_to<T>(input: &mut BufReader<File>, output: &mut BufWriter<File>) {
+    fn write_whole_to(input: &mut BufReader<File>, output: &mut BufWriter<File>) {
         loop {
             let mut line = String::new();
             match input.read_line(&mut line) {
@@ -445,5 +372,20 @@ pub mod file {
     fn write_line(output: &mut BufWriter<File>, to_write: &str) {
         let _ = output.write(to_write.as_bytes());
         let _ = output.write("\n".as_bytes());
+    }
+
+    fn prepare_input(input: &str) -> (&'static str, FileData) {
+        let dir_name = "__tmp_merge__";
+        let _ = fs::create_dir(&dir_name);
+
+        let copied_input = String::from(dir_name) + MAIN_SEPARATOR_STR + input;
+        let _ = fs::copy(&input, &copied_input);
+
+        (dir_name, FileData { file: File::open(&copied_input).expect("Couldn't open the file"), path: copied_input })
+    }
+
+    fn clean(result_path: &str, output_path: &str, tmp_dir: &str) {
+        let _ = fs::rename(&result_path, &output_path);
+        let _ = fs::remove_dir(&tmp_dir);
     }
 }

@@ -2,7 +2,7 @@ use rand::distributions::Distribution;
 use rand::distributions::Uniform;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::str::FromStr;
 
 pub fn load_file(file_path: &str) -> String {
@@ -93,6 +93,11 @@ pub fn write_random_data(file_path: &str, numbers_count: usize) -> io::Result<()
         }
     }
     Ok(())
+}
+
+pub fn get_lines_count(path: &str) -> io::Result<usize> {
+    let new_file = File::open(&path)?;
+    Ok(BufReader::new(new_file).lines().count())
 }
 
 #[cfg(test)]
