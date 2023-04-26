@@ -139,10 +139,24 @@ pub mod file {
 
     impl<T: ram::Sort + FromStr + ToString> Sort for T {}
 
+    #[derive(Debug, PartialEq)]
     pub enum ExecPolicy {
         FullPar,
-        FileParRamSeq,
-        FileSeqRamPar,
+        FilePar,
+        RamPar,
+    }
+
+    impl FromStr for ExecPolicy {
+        type Err = &'static str;
+
+        fn from_str(input: &str) -> Result<ExecPolicy, Self::Err> {
+            match input {
+                "FullPar"  => Ok(ExecPolicy::FullPar),
+                "FilePar"  => Ok(ExecPolicy::FilePar),
+                "RamPar"  => Ok(ExecPolicy::RamPar),
+                _      => Err("Wrong value"),
+            }
+        }
     }
 
     struct FileData {
@@ -170,7 +184,7 @@ pub mod file {
             let output_path = String::from(&input.path) + "w";
             let _ = file_reader::write_from_vec(&output_path, &ram::merge_sort_seq(&data), "\n");
             let _ = fs::remove_file(input.path);
-            return FileData { file: File::open(&output_path).unwrap(), path: output_path };
+            return FileData { file: File::open(&output_path).expect(format!("Couldn't open the file: {}", &output_path).as_str()), path: output_path };
         }
 
         let tmp_output_path = String::from(&input.path) + "m";
@@ -179,7 +193,7 @@ pub mod file {
         let left_sorted = merge_sort_seq_helper::<T>(left, max_size_in_ram);
         let right_sorted = merge_sort_seq_helper::<T>(right, max_size_in_ram);
 
-        let tmp_output = File::create(&tmp_output_path).expect("Couldn't open the file");
+        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
@@ -190,10 +204,10 @@ pub mod file {
             ExecPolicy::FullPar => {
                 merge_sort_full_par_helper::<T>(prepared_input, max_size_in_ram, Arc::new(Mutex::new(ThreadPool::new(threads_count))))
             }
-            ExecPolicy::FileParRamSeq => {
+            ExecPolicy::FilePar => {
                 merge_sort_file_par_ram_seq_helper::<T>(prepared_input, max_size_in_ram, Arc::new(Mutex::new(ThreadPool::new(threads_count))))
             }
-            ExecPolicy::FileSeqRamPar => {
+            ExecPolicy::RamPar => {
                 merge_sort_file_seq_ram_par_helper::<T>(prepared_input, max_size_in_ram, threads_count)
             }
         };
@@ -223,7 +237,7 @@ pub mod file {
         let right_sorted = merge_sort_full_par_helper::<T>(right, max_size_in_ram, Arc::clone(&pool));
         let left_sorted = result.recv().unwrap();
 
-        let tmp_output = File::create(&tmp_output_path).expect("Couldn't open the file");
+        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
@@ -257,7 +271,7 @@ pub mod file {
         let right_sorted = merge_sort_file_par_ram_seq_helper::<T>(right, max_size_in_ram, Arc::clone(&pool));
         let left_sorted = result.recv().unwrap();
 
-        let tmp_output = File::create(&tmp_output_path).expect("Couldn't open the file");
+        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
@@ -274,18 +288,18 @@ pub mod file {
         let left_sorted = merge_sort_file_seq_ram_par_helper::<T>(left, max_size_in_ram, threads_count);
         let right_sorted = merge_sort_file_seq_ram_par_helper::<T>(right, max_size_in_ram, threads_count);
 
-        let tmp_output = File::create(&tmp_output_path).expect("Couldn't open the file");
+        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
         merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
     }
 
     fn split_file(input: FileData) -> (FileData, FileData) {
-        let lines_count = file_reader::get_lines_count(&input.path).expect("Couldn't open the file");
+        let lines_count = file_reader::get_lines_count(&input.path).expect(format!("Couldn't open the file: {}", &input.path).as_str());
 
         let file1_path = input.path.clone() + "1";
         let file2_path = input.path.clone() + "2";
 
-        let file1 = File::create(file1_path.as_str()).expect("Couldn't open the file");
-        let file2 = File::create(file2_path.as_str()).expect("Couldn't open the file");
+        let file1 = File::create(&file1_path).expect(format!("Couldn't open the file: {}", &file1_path).as_str());
+        let file2 = File::create(&file2_path).expect(format!("Couldn't open the file: {}", &file2_path).as_str());
 
         let mut buffer1 = BufWriter::new(file1);
         let mut buffer2 = BufWriter::new(file2);
@@ -301,8 +315,8 @@ pub mod file {
 
         let _ = fs::remove_file(input.path);
 
-        (FileData { file: File::open(file1_path.as_str()).expect("Couldn't open the file"), path: file1_path },
-         FileData { file: File::open(file2_path.as_str()).expect("Couldn't open the file"), path: file2_path })
+        (FileData { file: File::open(&file1_path).expect(format!("Couldn't open the file: {}", &file1_path).as_str()), path: file1_path },
+         FileData { file: File::open(&file2_path).expect(format!("Couldn't open the file: {}", &file2_path).as_str()), path: file2_path })
     }
 
     fn merge<T: Sort>(left: FileData, right: FileData, output: FileData) -> FileData {
@@ -337,7 +351,7 @@ pub mod file {
         let _ = fs::remove_file(left.path);
         let _ = fs::remove_file(right.path);
 
-        let result = File::open(&output.path).expect("Couldn't open the file");
+        let result = File::open(&output.path).expect(format!("Couldn't open the file: {}", &output.path).as_str());
         FileData { file: result, path: output.path }
     }
 
@@ -381,7 +395,7 @@ pub mod file {
         let copied_input = String::from(dir_name) + MAIN_SEPARATOR_STR + input;
         let _ = fs::copy(&input, &copied_input);
 
-        (dir_name, FileData { file: File::open(&copied_input).expect("Couldn't open the file"), path: copied_input })
+        (dir_name, FileData { file: File::open(&copied_input).expect(format!("Couldn't open the file: {}", &copied_input).as_str()), path: copied_input })
     }
 
     fn clean(result_path: &str, output_path: &str, tmp_dir: &str) {

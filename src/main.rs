@@ -2,81 +2,100 @@ mod file_reader;
 mod merge_sorter;
 mod thread_pool;
 
+use argh::FromArgs;
 use std::{env};
 use std::thread::available_parallelism;
 use std::time::Instant;
 use crate::merge_sorter::file::ExecPolicy;
 
-fn dispatch_task(args: &[String]) {
-    if args.len() < 2 {
-        println!("Too few arguments!");
-        return;
-    }
-
-    const GENERATOR_FLAG: &str = "-g";
-    const SORTER_FLAG: &str = "-s";
-
-    match args[1].as_str() {
-        GENERATOR_FLAG => {
-            if args.len() < 4 {
-                println!("Too few arguments for generator!");
-                return;
-            }
-            match args[2].parse::<usize>() {
-                Ok(number) => {
-                    handle_generator(number, &args[3]);
-                }
-                Err(_) => print!("{} is not a number!", args[2]),
-            };
-        }
-        SORTER_FLAG => {
-            if args.len() < 4 {
-                println!("Too few arguments for generator!");
-                return;
-            }
-            let threads_count = get_threads_count(args);
-            println!("Using {} threads", threads_count);
-            handle_sorter(&args[2], &args[3], threads_count);
-        }
-        _ => {
-            println!("Unknown flag: {}", args[1]);
-        }
-    }
+#[derive(FromArgs, PartialEq, Debug)]
+/// Configuration
+struct Config {
+    #[argh(subcommand)]
+    mode: Mode,
 }
 
-fn get_threads_count(args: &[String]) -> usize {
-    if args.len() > 4 {
-        match args[4].parse::<usize>() {
-            Ok(number) =>
-                return number,
-            Err(_) => {
-                print!("{} is not a number! Using default number of threads", args[2]);
-            }
-        };
-    };
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand)]
+enum Mode {
+    Generator(Generator),
+    Sorter(Sorter)
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "generator")]
+/// generates a file with random u32 numbers
+struct Generator {
+    /// output path for generator
+    #[argh(option, short = 'o')]
+    output_path: String,
+
+    /// u32 numbers count to be generated
+    #[argh(option, short = 'n')]
+    numbers_count: usize,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "sorter")]
+/// sorts a file using merge-sort algorithm
+struct Sorter{
+    /// path for input data to sort
+    #[argh(option, short = 'i')]
+    input_path: String,
+
+    /// path for sorted output
+    #[argh(option, short = 'o')]
+    output_path: String,
+
+    /// maximum threads count to be used during sorting
+    #[argh(option, short = 't', default = "available_threads()")]
+    threads_count: usize,
+
+    /// maximum size of the file that can be sorted in ram
+    #[argh(option, short = 's', default = "default_ram()")]
+    data_in_ram: usize,
+
+    /// available values:                                          |
+    /// FullPar - sorting both files and in ram is parallel        |
+    /// FilePar - only sorting a file is parallel                  |
+    /// RamPar - only sorting in ram is parallel                   |
+    #[argh(option, short = 'e', default = "ExecPolicy::FullPar")]
+    exec_policy: ExecPolicy,
+}
+
+fn available_threads() -> usize {
     match available_parallelism() {
         Ok(number) => number.get(),
         Err(e) => {
-            println!("Error: {}", e);
+            println!("Error: {}. Using only 1 thread", e);
             1
         }
     }
 }
 
-fn handle_generator(numbers_count: usize, file_path: &str) {
-    let result = file_reader::write_random_data(&file_path, numbers_count);
-    match result {
-        Err(err) => println!("{}", err),
-        _ => {}
-    };
+fn default_ram() -> usize {
+    (sys_info::mem_info().expect("Failed to get ram size. Need to specify it manually").total * 1000 / 4) as usize
 }
 
-fn handle_sorter(file_in: &str, file_out: &str, threads_count: usize) {
-    let now = Instant::now();
-    merge_sorter::file::merge_sort::<usize>(file_in, file_out, 1000000000, threads_count, ExecPolicy::FullPar);
-    println!("File has been sorted in {} s", now.elapsed().as_secs());
+fn dispatch_task(config: Config) {
+    match config.mode {
+        Mode::Generator(generator) => {
+            let now = Instant::now();
+            let result = file_reader::write_random_data(&generator.output_path, generator.numbers_count);
+            println!("File has been generated in {} s", now.elapsed().as_secs());
+            match result {
+                Err(err) => println!("{}", err),
+                _ => {}
+            };
+        }
+        Mode::Sorter(sorter) => {
+            let now = Instant::now();
+            merge_sorter::file::merge_sort::<u32>(&sorter.input_path, &sorter.output_path, sorter.data_in_ram, sorter.threads_count, sorter.exec_policy);
+            println!("File has been sorted in {} s", now.elapsed().as_secs());
+        }
+    }
 }
 
 fn main() {
-    dispatch_task(&env::args().collect::<Vec<String>>())
+    dispatch_task(argh::from_env());
 }
