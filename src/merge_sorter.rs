@@ -189,12 +189,16 @@ pub mod file {
 
         let tmp_output_path = String::from(&input.path) + "m";
 
-        let (left, right) = split_file(input);
-        let left_sorted = merge_sort_seq_helper::<T>(left, max_size_in_ram);
-        let right_sorted = merge_sort_seq_helper::<T>(right, max_size_in_ram);
+        match split_file(input) {
+            Ok(files) => {
+                let left_sorted = merge_sort_seq_helper::<T>(files.0, max_size_in_ram);
+                let right_sorted = merge_sort_seq_helper::<T>(files.1, max_size_in_ram);
 
-        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
-        merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
+                let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
+                merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
+            }
+            Err(unit_file) => unit_file
+        }
     }
 
     pub fn merge_sort_par<T: Sort + Channel>(input: &str, output: &str, max_size_in_ram: usize, threads_count: usize, exec_policy: ExecPolicy) {
@@ -230,15 +234,18 @@ pub mod file {
 
         let tmp_output_path = String::from(&input.path) + "m";
 
-        let (left, right) = split_file(input);
+        match split_file(input) {
+            Ok(files) => {
+                let new_pool = Arc::clone(&pool);
+                let result = pool.lock().unwrap().execute(move || merge_sort_full_par_helper::<T>(files.0, max_size_in_ram, new_pool));
+                let right_sorted = merge_sort_full_par_helper::<T>(files.1, max_size_in_ram, Arc::clone(&pool));
+                let left_sorted = result.recv().unwrap();
 
-        let new_pool = Arc::clone(&pool);
-        let result = pool.lock().unwrap().execute(move || merge_sort_full_par_helper::<T>(left, max_size_in_ram, new_pool));
-        let right_sorted = merge_sort_full_par_helper::<T>(right, max_size_in_ram, Arc::clone(&pool));
-        let left_sorted = result.recv().unwrap();
-
-        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
-        merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
+                let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
+                merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
+            }
+            Err(unit_file) => unit_file
+        }
     }
 
     fn merge_sort_file_par_ram_seq_helper<T: Sort + Channel>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>) -> FileData {
@@ -246,6 +253,47 @@ pub mod file {
             merge_sort_file_par_ram_seq_helper_unchecked::<T>(input, max_size_in_ram, pool)
         } else {
             merge_sort_seq_helper::<T>(input, max_size_in_ram)
+        }
+    }
+
+    fn merge_sort_file_par_ram_seq_helper_unchecked<T: Sort + Channel>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>) -> FileData {
+        if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
+            return compute_in_ram::<T>(&input.path, 1);
+        }
+
+        let tmp_output_path = String::from(&input.path) + "m";
+
+        match split_file(input) {
+            Ok(files) => {
+                let new_pool = Arc::clone(&pool);
+                let result = pool.lock().unwrap().execute(move || merge_sort_file_par_ram_seq_helper::<T>(files.0, max_size_in_ram, new_pool));
+                let right_sorted = merge_sort_file_par_ram_seq_helper::<T>(files.1, max_size_in_ram, Arc::clone(&pool));
+                let left_sorted = result.recv().unwrap();
+
+                let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
+                merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
+            }
+            Err(unit_file) => unit_file
+        }
+    }
+
+    fn merge_sort_file_seq_ram_par_helper<T: Sort + Channel>(input: FileData, max_size_in_ram: usize,
+                                                             threads_count: usize) -> FileData {
+        if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
+            return compute_in_ram::<T>(&input.path, threads_count);
+        }
+
+        let tmp_output_path = String::from(&input.path) + "m";
+
+        match split_file(input) {
+            Ok(files) => {
+                let left_sorted = merge_sort_file_seq_ram_par_helper::<T>(files.0, max_size_in_ram, threads_count);
+                let right_sorted = merge_sort_file_seq_ram_par_helper::<T>(files.1, max_size_in_ram, threads_count);
+
+                let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
+                merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
+            }
+            Err(unit_file) => unit_file
         }
     }
 
@@ -257,43 +305,12 @@ pub mod file {
         FileData { file: File::open(&output_path).unwrap(), path: output_path }
     }
 
-    fn merge_sort_file_par_ram_seq_helper_unchecked<T: Sort + Channel>(input: FileData, max_size_in_ram: usize, pool: Arc<Mutex<ThreadPool<FileData>>>) -> FileData {
-        if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
-            return compute_in_ram::<T>(&input.path, 1);
-        }
-
-        let tmp_output_path = String::from(&input.path) + "m";
-
-        let (left, right) = split_file(input);
-
-        let new_pool = Arc::clone(&pool);
-        let result = pool.lock().unwrap().execute(move || merge_sort_file_par_ram_seq_helper::<T>(left, max_size_in_ram, new_pool));
-        let right_sorted = merge_sort_file_par_ram_seq_helper::<T>(right, max_size_in_ram, Arc::clone(&pool));
-        let left_sorted = result.recv().unwrap();
-
-        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
-        merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
-    }
-
-    fn merge_sort_file_seq_ram_par_helper<T: Sort + Channel>(input: FileData, max_size_in_ram: usize,
-                                                             threads_count: usize) -> FileData {
-        if input.file.metadata().unwrap().len() < max_size_in_ram as u64 {
-            return compute_in_ram::<T>(&input.path, threads_count);
-        }
-
-        let tmp_output_path = String::from(&input.path) + "m";
-
-        let (left, right) = split_file(input);
-
-        let left_sorted = merge_sort_file_seq_ram_par_helper::<T>(left, max_size_in_ram, threads_count);
-        let right_sorted = merge_sort_file_seq_ram_par_helper::<T>(right, max_size_in_ram, threads_count);
-
-        let tmp_output = File::create(&tmp_output_path).expect(format!("Couldn't open the file: {}", &tmp_output_path).as_str());
-        merge::<T>(left_sorted, right_sorted, FileData { file: tmp_output, path: tmp_output_path })
-    }
-
-    fn split_file(input: FileData) -> (FileData, FileData) {
+    fn split_file(input: FileData) -> Result<(FileData, FileData), FileData> {
         let lines_count = file_reader::get_lines_count(&input.path).expect(format!("Couldn't open the file: {}", &input.path).as_str());
+
+        if lines_count < 2 {
+            return Err(input);
+        }
 
         let file1_path = input.path.clone() + "1";
         let file2_path = input.path.clone() + "2";
@@ -315,8 +332,8 @@ pub mod file {
 
         let _ = fs::remove_file(input.path);
 
-        (FileData { file: File::open(&file1_path).expect(format!("Couldn't open the file: {}", &file1_path).as_str()), path: file1_path },
-         FileData { file: File::open(&file2_path).expect(format!("Couldn't open the file: {}", &file2_path).as_str()), path: file2_path })
+        Ok((FileData { file: File::open(&file1_path).expect(format!("Couldn't open the file: {}", &file1_path).as_str()), path: file1_path },
+         FileData { file: File::open(&file2_path).expect(format!("Couldn't open the file: {}", &file2_path).as_str()), path: file2_path }))
     }
 
     fn merge<T: Sort>(left: FileData, right: FileData, output: FileData) -> FileData {
