@@ -50,12 +50,12 @@ pub fn write_from_vec<T: ToString>(
         return Err(file.err().unwrap());
     }
 
-    let elems: Vec<String> = data.iter().map(|elem| elem.to_string()).collect();
+    let mut output = BufWriter::with_capacity(100000000, file.unwrap());
 
-    let result = BufWriter::new(file.unwrap()).write_all(elems.join(delimiter).as_bytes());
-    if result.is_err() {
-        return Err(result.err().unwrap());
+    for elem in data {
+        output.write((elem.to_string() + delimiter).as_bytes())?;
     }
+
     Ok(())
 }
 
