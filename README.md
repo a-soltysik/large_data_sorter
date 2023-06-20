@@ -14,6 +14,7 @@ Commands:
 ```
 generator         generates a file with random u32 numbers
 sorter            sorts a file using merge-sort algorithm
+checker           checks if the given file is sorted
 ```
 
 ## Generator
@@ -49,4 +50,19 @@ FullPar - sorting both files and in ram is parallel
 FilePar - only sorting a file is parallel
 RamPar  - only sorting in ram is parallel
 --help              display usage information
+```
+
+## Checker
+
+Usage: 
+```
+large_data_sorter checker -i <input-path>
+```
+
+checks if the given file is sorted
+
+Options:
+```
+-i, --input-path  path of file to be checked
+--help            display usage information
 ```
